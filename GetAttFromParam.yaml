@@ -1,0 +1,241 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Get info from an Amazon VPC or subnet
+
+# GetAttFromParam - This AWS Cloudformation template contains an AWS Lambda
+# function written in Python that will look up attributes from an Amazon VPC
+# or subnet using a NameFilter that has been supplied as # a property. The
+# filter should match a single resource.
+#
+# Examples of filters are:
+#
+# vpc-1234
+# subnet-1234
+#
+# The reason this function was written is to provide functionality similar
+# to the GetAtt intrinsic but on user-supplied stack parameters, rather than
+# on resources instantiated by CloudFormation.
+#
+# The value that is returned for VPCs is:
+#
+# CidrBlock
+#
+# The values that are returned for subnets are:
+#
+# AvailabilityZone
+# CidrBlock
+# VpcId
+#
+# This CloudFormation template includes the following:
+#
+# 1. Sample parameters
+# 2. The Lambda execution role
+# 3. The Python-based Lambda function
+# 4. Sample resources
+# 5. Sample outputs
+#
+# NOTE: If you modify this template, pay specIal attention to spacing
+# and indentation as this template contains Python code embedded in
+# YAML.  Lines in the Python code that appear to be blank likely have leading
+# spaces.
+
+Parameters:
+  SubnetName:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet Identifier 
+
+  VpcName:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC Identifier
+    
+Resources:
+
+# LambdaExecutionRole - This role must have the IAM privileges to 
+# call the necessary EC2 API calls.  These API calls currently do
+# the following:
+#
+# - use CloudWatch Logs
+# - describe EC2 subnets
+# - describe EC2 VPCs
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+            - ec2:DescribeSubnets
+            - ec2:DescribeVpcs
+            Resource: "*"
+
+# NOTE: Pay special attention to the indentatiion in the Python code below.
+# Lines that appear blank are likely not blank, but have leading spaces.
+
+  GetAttFromParam:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Description: Look up info from a VPC or subnet ID 
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: "python3.6"
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import logging
+          
+          def handler(event, context):
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+            
+            # initialize our responses, assume failure by default
+            
+            response_data = {}
+            response_status = cfnresponse.FAILED
+            
+            logger.info('Received event: {}'.format(json.dumps(event)))
+            
+            if event['RequestType'] == 'Delete':
+              response_status = cfnresponse.SUCCESS
+              cfnresponse.send(event, context, response_status, response_data)
+            
+            try:
+              ec2=boto3.client('ec2')
+            except Exception as e:
+              logger.info('boto3.client failure: {}'.format(e))
+              cfnresponse.send(event, context, response_status, response_data)
+            
+            name_filter = event['ResourceProperties']['NameFilter']
+            name_filter_parts = name_filter.split('-')
+            resource_type=name_filter_parts[0]
+            
+            if resource_type == "vpc":
+              try:
+                vpcs=ec2.describe_vpcs(VpcIds=[name_filter])
+              except Exception as e:
+                logger.info('ec2.describe_vpcs failure: {}'.format(e))
+                cfnresponse.send(event, context, response_status, response_data)
+              
+              number_of_vpcs = len(vpcs['Vpcs'])
+              logger.info('number of vpcs returned: {}'.format(number_of_vpcs))
+              
+              if number_of_vpcs == 1:
+                CidrBlock = vpcs['Vpcs'][0]['CidrBlock']
+                response_data['CidrBlock'] = CidrBlock
+                logger.info('vpc CidrBlock {}'.format(CidrBlock))
+                response_status = cfnresponse.SUCCESS
+                cfnresponse.send(event, context, response_status, response_data)
+              
+              elif number_of_vpcs == 0:
+                logger.info('no matching vpcs for filter {}'.format(name_filter))
+                cfnresponse.send(event, context, response_status, response_data)
+              
+              else:
+                logger.info('multiple matching vpcs for filter {}'.format(name_filter))
+                cfnresponse.send(event, context, response_status, response_data)
+              
+            elif resource_type == "subnet":
+              try:
+                subnets = ec2.describe_subnets(SubnetIds=[name_filter])
+              except Exception as e:
+                logger.info('ec2.describe_subnets failure: {}'.format(e))
+                cfnresponse.send(event, context, response_status, response_data)
+              
+              number_of_subnets = len(subnets['Subnets'])
+              logger.info('number of subnets returned: {}'.format(number_of_subnets))
+              
+              if number_of_subnets == 1:
+                CidrBlock = subnets['Subnets'][0]['CidrBlock']
+                VpcId = subnets['Subnets'][0]['VpcId']
+                AvailabilityZone = subnets['Subnets'][0]['AvailabilityZone']
+                response_data['AvailabilityZone'] = AvailabilityZone
+                response_data['CidrBlock'] = CidrBlock
+                response_data['VpcId'] = VpcId
+                
+                logger.info('subnet AvailabilityZone {}'.format(AvailabilityZone))
+                logger.info('subnet CidrBlock {}'.format(CidrBlock))
+                logger.info('subnet VpcId {}'.format(VpcId))
+                
+                response_status = cfnresponse.SUCCESS
+                cfnresponse.send(event, context, response_status, response_data)
+                
+              elif number_of_subnets == 0:
+                logger.info('no matching subnet for filter {}'.format(name_filter))
+                cfnresponse.send(event, context, response_status, response_data)
+                
+              else:
+                logger.info('multiple matching subnets for filter {}'.format(name_filter))
+                cfnresponse.send(event, context, response_status, response_data)
+              
+            else:
+              logger.info('invalid resource type {}'.resource_type)
+              cfnresponse.send(event, context, response_status, response_data)
+
+# VpcInfo - The AWS Lambda-backed resource for looking up an Amazon VPC
+#
+# Parameters
+#
+# ServiceToken - a pointer to the AWS Lambda function
+# NameFilter - the VPC parameter which serves as a filter
+
+  VpcInfo:
+    Type: Custom::VpcInfo
+    Properties:
+      ServiceToken: !GetAtt GetAttFromParam.Arn
+      NameFilter: !Ref VpcName
+
+# SubnetInfo - The AWS Lambda-backed resource for looking up an Amazon subnet
+#
+# Parameters
+#
+# ServiceToken - a pointer to the AWS Lambda function
+# NameFilter - the subnet parameter which serves as a filter
+
+  SubnetInfo:
+    Type: Custom::SubnetInfo
+    Properties:
+      ServiceToken: !GetAtt GetAttFromParam.Arn
+      NameFilter: !Ref SubnetName
+
+# Outputs - Display function output
+
+Outputs:
+  VPCCidrBlock:
+    Description: VPC CidrBlock
+    Value: !GetAtt VpcInfo.CidrBlock
+
+  SubnetAvailabilityZone:
+    Description: Subnet AvailabilityZone
+    Value: !GetAtt SubnetInfo.AvailabilityZone
+
+  SubnetCidrBlock:
+    Description: Subnet CidrBlock
+    Value: !GetAtt SubnetInfo.CidrBlock
+
+  SubnetVpcId:
+    Description: Subnet VpcId
+    Value: !GetAtt SubnetInfo.VpcId
